@@ -224,4 +224,3 @@ real **mk_2D_array(size_t n1, size_t n2, bool zero)
     }
     return ret;
 }
-
