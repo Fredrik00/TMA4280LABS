@@ -12,6 +12,8 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <math.h>
+#include <omp.h>
+#include <mpi.h>
 
 #define PI 3.14159265358979323846
 #define true 1
@@ -34,129 +36,148 @@ void fstinv_(real *v, int *n, real *w, int *nn);
 
 int main(int argc, char **argv)
 {
-    if (argc < 2) {
-        printf("Usage:\n");
-        printf("  poisson n\n\n");
-        printf("Arguments:\n");
-        printf("  n: the problem size (must be a power of 2)\n");
-    }
+	if (argc < 2) {
+	printf("Usage:\n");
+	printf("  poisson n\n\n");
+	printf("Arguments:\n");
+	printf("  n: the problem size (must be a power of 2)\n");
+	}
 
-    /*
-     *  The equation is solved on a 2D structured grid and homogeneous Dirichlet
-     *  conditions are applied on the boundary:
-     *  - the number of grid points in each direction is n+1,
-     *  - the number of degrees of freedom in each direction is m = n-1,
-     *  - the mesh size is constant h = 1/n.
-     */
-    int n = atoi(argv[1]);
-    int m = n - 1;
-    real h = 1.0 / n;
+	/*
+	*  The equation is solved on a 2D structured grid and homogeneous Dirichlet
+	*  conditions are applied on the boundary:
+	*  - the number of grid points in each direction is n+1,
+	*  - the number of degrees of freedom in each direction is m = n-1,
+	*  - the mesh size is constant h = 1/n.
+	*/
+	int n = atoi(argv[1]);
+	int m = n - 1;
+	real h = 1.0 / n;
 
-    /*
-     * Grid points are generated with constant mesh size on both x- and y-axis.
-     */
-    real *grid = mk_1D_array(n+1, false);
-    for (size_t i = 0; i < n+1; i++) {
-        grid[i] = i * h;
-    }
+	int nprocs, rank;
+	double time_start;
+	double duration;
 
-    /*
-     * The diagonal of the eigenvalue matrix of T is set with the eigenvalues
-     * defined Chapter 9. page 93 of the Lecture Notes.
-     * Note that the indexing starts from zero here, thus i+1.
-     */
-    real *diag = mk_1D_array(m, false);
-    for (size_t i = 0; i < m; i++) {
-        diag[i] = 2.0 * (1.0 - cos((i+1) * PI / n));
-    }
+	MPI_Init(&argc, &argv);
+	MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
-    /*
-     * Allocate the matrices b and bt which will be used for storing value of
-     * G, \tilde G^T, \tilde U^T, U as described in Chapter 9. page 101.
-     */
-    real **b = mk_2D_array(m, m, false);
-    real **bt = mk_2D_array(m, m, false);
+	if (rank == 0) {
+		time_start = MPI_Wtime();	
+	}
 
-    /*
-     * This vector will holds coefficients of the Discrete Sine Transform (DST)
-     * but also of the Fast Fourier Transform used in the FORTRAN code.
-     * The storage size is set to nn = 4 * n, look at Chapter 9. pages 98-100:
-     * - Fourier coefficients are complex so storage is used for the real part
-     *   and the imaginary part.
-     * - Fourier coefficients are defined for j = [[ - (n-1), + (n-1) ]] while 
-     *   DST coefficients are defined for j [[ 0, n-1 ]].
-     * As explained in the Lecture notes coefficients for positive j are stored
-     * first.
-     * The array is allocated once and passed as arguments to avoid doings 
-     * reallocations at each function call.
-     */
-    int nn = 4 * n;
-    real *z = mk_1D_array(nn, false);
+	/*
+	* Grid points are generated with constant mesh size on both x- and y-axis.
+	*/
+	real *grid = mk_1D_array(n+1, false);
+	for (size_t i = 0; i < n+1; i++) {
+		grid[i] = i * h;
+	}
 
-    /*
-     * Initialize the right hand side data for a given rhs function.
-     * Note that the right hand-side is set at nodes corresponding to degrees
-     * of freedom, so it excludes the boundary (bug fixed by petterjf 2017).
-     * 
-     */
-    for (size_t i = 0; i < m; i++) {
-        for (size_t j = 0; j < m; j++) {
-            b[i][j] = h * h * rhs(grid[i+1], grid[j+1]);
-        }
-    }
+	/*
+	* The diagonal of the eigenvalue matrix of T is set with the eigenvalues
+	* defined Chapter 9. page 93 of the Lecture Notes.
+	* Note that the indexing starts from zero here, thus i+1.
+	*/
+	real *diag = mk_1D_array(m, false);
+	for (size_t i = 0; i < m; i++) {
+		diag[i] = 2.0 * (1.0 - cos((i+1) * PI / n));
+	}
 
-    /*
-     * Compute \tilde G^T = S^-1 * (S * G)^T (Chapter 9. page 101 step 1)
-     * Instead of using two matrix-matrix products the Discrete Sine Transform
-     * (DST) is used.
-     * The DST code is implemented in FORTRAN in fsf.f and can be called from C.
-     * The array zz is used as storage for DST coefficients and internally for 
-     * FFT coefficients in fst_ and fstinv_.
-     * In functions fst_ and fst_inv_ coefficients are written back to the input 
-     * array (first argument) so that the initial values are overwritten.
-     */
-    for (size_t i = 0; i < m; i++) {
-        fst_(b[i], &n, z, &nn);
-    }
-    transpose(bt, b, m);
-    for (size_t i = 0; i < m; i++) {
-        fstinv_(bt[i], &n, z, &nn);
-    }
+	/*
+	* Allocate the matrices b and bt which will be used for storing value of
+	* G, \tilde G^T, \tilde U^T, U as described in Chapter 9. page 101.
+	*/
+	real **b = mk_2D_array(m, m, false);
+	real **bt = mk_2D_array(m, m, false);
 
-    /*
-     * Solve Lambda * \tilde U = \tilde G (Chapter 9. page 101 step 2)
-     */
-    for (size_t i = 0; i < m; i++) {
-        for (size_t j = 0; j < m; j++) {
-            bt[i][j] = bt[i][j] / (diag[i] + diag[j]);
-        }
-    }
+	/*
+	* This vector will holds coefficients of the Discrete Sine Transform (DST)
+	* but also of the Fast Fourier Transform used in the FORTRAN code.
+	* The storage size is set to nn = 4 * n, look at Chapter 9. pages 98-100:
+	* - Fourier coefficients are complex so storage is used for the real part
+	*   and the imaginary part.
+	* - Fourier coefficients are defined for j = [[ - (n-1), + (n-1) ]] while 
+	*   DST coefficients are defined for j [[ 0, n-1 ]].
+	* As explained in the Lecture notes coefficients for positive j are stored
+	* first.
+	* The array is allocated once and passed as arguments to avoid doings 
+	* reallocations at each function call.
+	*/
+	int nn = 4 * n;
+	real *z = mk_1D_array(nn, false);
 
-    /*
-     * Compute U = S^-1 * (S * Utilde^T) (Chapter 9. page 101 step 3)
-     */
-    for (size_t i = 0; i < m; i++) {
-        fst_(bt[i], &n, z, &nn);
-    }
-    transpose(b, bt, m);
-    for (size_t i = 0; i < m; i++) {
-        fstinv_(b[i], &n, z, &nn);
-    }
+	/*
+	* Initialize the right hand side data for a given rhs function.
+	* Note that the right hand-side is set at nodes corresponding to degrees
+	* of freedom, so it excludes the boundary (bug fixed by petterjf 2017).
+	* 
+	*/
+	for (size_t i = 0; i < m; i++) {
+		for (size_t j = 0; j < m; j++) {
+			b[i][j] = h * h * rhs(grid[i+1], grid[j+1]);
+		}
+	}
 
-    /*
-     * Compute maximal value of solution for convergence analysis in L_\infty
-     * norm.
-     */
-    double u_max = 0.0;
-    for (size_t i = 0; i < m; i++) {
-        for (size_t j = 0; j < m; j++) {
-            u_max = u_max > b[i][j] ? u_max : b[i][j];
-        }
-    }
+	/*
+	* Compute \tilde G^T = S^-1 * (S * G)^T (Chapter 9. page 101 step 1)
+	* Instead of using two matrix-matrix products the Discrete Sine Transform
+	* (DST) is used.
+	* The DST code is implemented in FORTRAN in fsf.f and can be called from C.
+	* The array zz is used as storage for DST coefficients and internally for 
+	* FFT coefficients in fst_ and fstinv_.
+	* In functions fst_ and fst_inv_ coefficients are written back to the input 
+	* array (first argument) so that the initial values are overwritten.
+	*/
+	for (size_t i = 0; i < m; i++) {
+		fst_(b[i], &n, z, &nn);
+	}
+	transpose(bt, b, m);
+	for (size_t i = 0; i < m; i++) {
+		fstinv_(bt[i], &n, z, &nn);
+	}
 
-    printf("u_max = %e\n", u_max);
+	/*
+	* Solve Lambda * \tilde U = \tilde G (Chapter 9. page 101 step 2)
+	*/
+	for (size_t i = 0; i < m; i++) {
+		for (size_t j = 0; j < m; j++) {
+			bt[i][j] = bt[i][j] / (diag[i] + diag[j]);
+		}
+	}
 
-    return 0;
+	/*
+	* Compute U = S^-1 * (S * Utilde^T) (Chapter 9. page 101 step 3)
+	*/
+	for (size_t i = 0; i < m; i++) {
+		fst_(bt[i], &n, z, &nn);
+	}
+	transpose(b, bt, m);
+	for (size_t i = 0; i < m; i++) {
+		fstinv_(b[i], &n, z, &nn);
+	}
+
+	/*
+	* Compute maximal value of solution for convergence analysis in L_\infty
+	* norm.
+	*/
+	double u_max = 0.0;
+	for (size_t i = 0; i < m; i++) {
+		for (size_t j = 0; j < m; j++) {
+			u_max = u_max > b[i][j] ? u_max : b[i][j];
+		}
+	}
+
+	if (rank == 0) {
+		duration = MPI_Wtime() - time_start;
+		printf("duration: %e\n", duration);
+	}
+
+	printf("u_max = %e\n", u_max);
+	
+	MPI_Finalize();
+
+	return 0;
 }
 
 /*
@@ -165,7 +186,7 @@ int main(int argc, char **argv)
  */
 
 real rhs(real x, real y) {
-    return 2 * (y - y*y + x - x*x);
+	return 2 * (y - y*y + x - x*x);
 }
 
 /*
@@ -176,11 +197,83 @@ real rhs(real x, real y) {
 
 void transpose(real **bt, real **b, size_t m)
 {
-    for (size_t i = 0; i < m; i++) {
-        for (size_t j = 0; j < m; j++) {
-            bt[i][j] = b[j][i];
-        }
-    }
+	int rows[2] = {0, 0};  // index, number of rows
+	int nprocs, rank;
+	int tag = 100;
+	MPI_Status status;
+	MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+	int sendcounts[nprocs];
+	int recvcounts[nprocs];
+	int senddisps[nprocs];
+	int recvdisps[nprocs];
+
+	if (rank == 0) {
+		for (size_t i = 0; i < m; i++) {
+			for (size_t j = 0; j < m; j++) {
+				printf("%f	", b[i][j]);
+			}
+			printf("\n");
+		}
+		printf("\n");
+	}
+
+	if (rank ==  0) {
+		int rows_left = m;
+		int p_left = nprocs;
+	
+		while (p_left > 0) {
+			rows[1] = rows_left/p_left;
+			MPI_Send(&rows, 2, MPI_INT, nprocs-p_left, tag, MPI_COMM_WORLD);
+			recvcounts[nprocs-p_left] = rows[1]*m;
+			recvdisps[nprocs-p_left] = rows[0]*m;
+			rows[0] += rows[1];
+			rows_left -= rows[1];
+			p_left--;
+		}
+	}
+	
+	MPI_Recv(&rows, 2, MPI_INT, 0, tag, MPI_COMM_WORLD, &status);
+	//MPI_Barrier(MPI_COMM_WORLD);	
+
+	// Every process need a copy of the receive buffer information
+	MPI_Bcast(&recvcounts, nprocs, MPI_INT, 0, MPI_COMM_WORLD);
+	MPI_Bcast(&recvdisps, nprocs, MPI_INT, 0, MPI_COMM_WORLD);
+	
+	for (int i = 0; i < nprocs; i++) {
+		sendcounts[i] = rows[1]*m;
+		senddisps[i] = rows[0]*m;
+	}
+	
+	// Each process transposes their assigned rows
+	for (size_t i = rows[0]; i < rows[0] + rows[1]; i++) {
+		for (size_t j = 0; j < m; j++) {
+			bt[i][j] = b[j][i];
+		}
+	}
+
+
+/*
+	for (size_t i = 0; i < m; i++) {
+		for (size_t j = 0; j < m; j++) {
+			bt[i][j] = b[j][i];
+		}
+	}
+*/
+
+	// Every process sends their transposed rows, and stores received ones in bt
+	MPI_Alltoallv(bt[0], sendcounts, senddisps, MPI_DOUBLE, bt[0], recvcounts, recvdisps, MPI_DOUBLE, MPI_COMM_WORLD);
+
+	
+	if (rank == 0) {
+		for (size_t i = 0; i < m; i++) {
+			for (size_t j = 0; j < m; j++) {
+				printf("%f	", bt[i][j]);
+			}
+			printf("\n");
+		}
+		printf("\n");
+	}
 }
 
 /*
@@ -190,10 +283,10 @@ void transpose(real **bt, real **b, size_t m)
 
 real *mk_1D_array(size_t n, bool zero)
 {
-    if (zero) {
-        return (real *)calloc(n, sizeof(real));
-    }
-    return (real *)malloc(n * sizeof(real));
+	if (zero) {
+		return (real *)calloc(n, sizeof(real));
+	}
+	return (real *)malloc(n * sizeof(real));
 }
 
 /*
@@ -207,20 +300,20 @@ real *mk_1D_array(size_t n, bool zero)
 
 real **mk_2D_array(size_t n1, size_t n2, bool zero)
 {
-    // 1
-    real **ret = (real **)malloc(n1 * sizeof(real *));
+	// 1
+	real **ret = (real **)malloc(n1 * sizeof(real *));
 
-    // 2
-    if (zero) {
-        ret[0] = (real *)calloc(n1 * n2, sizeof(real));
-    }
-    else {
-        ret[0] = (real *)malloc(n1 * n2 * sizeof(real));
-    }
-    
-    // 3
-    for (size_t i = 1; i < n1; i++) {
-        ret[i] = ret[i-1] + n2;
-    }
-    return ret;
+	// 2
+	if (zero) {
+		ret[0] = (real *)calloc(n1 * n2, sizeof(real));
+	}
+	else {
+		ret[0] = (real *)malloc(n1 * n2 * sizeof(real));
+	}
+
+	// 3
+	for (size_t i = 1; i < n1; i++) {
+		ret[i] = ret[i-1] + n2;
+	}
+	return ret;
 }
