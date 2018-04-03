@@ -24,9 +24,11 @@ typedef int bool;
 
 // Function prototypes
 real *mk_1D_array(size_t n, bool zero);
+int *mk_int_array(size_t n, bool zero);
 real **mk_2D_array(size_t n1, size_t n2, bool zero);
 void transpose(real **bt, real **b, size_t m);
 real rhs(real x, real y);
+void distribute_work(int total, int *work, int *recvcounts, int *recvdisps);
 
 // Functions implemented in FORTRAN in fst.f and called from C.
 // The trailing underscore comes from a convention for symbol names, called name
@@ -55,8 +57,16 @@ int main(int argc, char **argv)
 	real h = 1.0 / n;
 
 	int nprocs, rank;
+	int tag = 100;
+	MPI_Status status;
 	double time_start;
 	double duration;
+	// Use these variables globally?
+	int *work = mk_int_array(2, true);  // index, number of rows
+	int *sendcounts = mk_int_array(nprocs, true);
+	int *recvcounts = mk_int_array(nprocs, true);
+	int *senddisps = mk_int_array(nprocs, true);
+	int *recvdisps = mk_int_array(nprocs, true);
 
 	MPI_Init(&argc, &argv);
 	MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
@@ -70,9 +80,18 @@ int main(int argc, char **argv)
 	* Grid points are generated with constant mesh size on both x- and y-axis.
 	*/
 	real *grid = mk_1D_array(n+1, false);
-	for (size_t i = 0; i < n+1; i++) {
+	distribute_work(n+1, work, recvcounts, recvdisps);
+	
+	for (int i = 0; i < nprocs; i++) {
+		sendcounts[i] = work[1];
+		senddisps[i] = work[0];
+	}
+
+	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
 		grid[i] = i * h;
 	}
+
+	MPI_Alltoallv(grid, sendcounts, senddisps, MPI_DOUBLE, grid, recvcounts, recvdisps, MPI_DOUBLE, MPI_COMM_WORLD);
 
 	/*
 	* The diagonal of the eigenvalue matrix of T is set with the eigenvalues
@@ -80,9 +99,18 @@ int main(int argc, char **argv)
 	* Note that the indexing starts from zero here, thus i+1.
 	*/
 	real *diag = mk_1D_array(m, false);
-	for (size_t i = 0; i < m; i++) {
+	distribute_work(m, work, recvcounts, recvdisps);
+	
+	for (int i = 0; i < nprocs; i++) {
+		sendcounts[i] = work[1];
+		senddisps[i] = work[0];
+	}
+
+	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
 		diag[i] = 2.0 * (1.0 - cos((i+1) * PI / n));
 	}
+
+	MPI_Alltoallv(diag, sendcounts, senddisps, MPI_DOUBLE, diag, recvcounts, recvdisps, MPI_DOUBLE, MPI_COMM_WORLD);
 
 	/*
 	* Allocate the matrices b and bt which will be used for storing value of
@@ -113,11 +141,24 @@ int main(int argc, char **argv)
 	* of freedom, so it excludes the boundary (bug fixed by petterjf 2017).
 	* 
 	*/
-	for (size_t i = 0; i < m; i++) {
+
+	// Work already distributed for m
+		
+	for (int i = 0; i < nprocs; i++) {
+		sendcounts[i] = work[1]*m;
+		senddisps[i] = work[0]*m;
+		recvcounts[i] = recvcounts[i]*m;
+		recvdisps[i] = recvdisps[i]*m;
+	}
+
+	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
 		for (size_t j = 0; j < m; j++) {
 			b[i][j] = h * h * rhs(grid[i+1], grid[j+1]);
 		}
 	}
+
+	
+	MPI_Alltoallv(b[0], sendcounts, senddisps, MPI_DOUBLE, b[0], recvcounts, recvdisps, MPI_DOUBLE, MPI_COMM_WORLD);
 
 	/*
 	* Compute \tilde G^T = S^-1 * (S * G)^T (Chapter 9. page 101 step 1)
@@ -129,51 +170,77 @@ int main(int argc, char **argv)
 	* In functions fst_ and fst_inv_ coefficients are written back to the input 
 	* array (first argument) so that the initial values are overwritten.
 	*/
-	for (size_t i = 0; i < m; i++) {
+	// Work already distributed for m
+	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
 		fst_(b[i], &n, z, &nn);
 	}
+	
+	MPI_Alltoallv(b[0], sendcounts, senddisps, MPI_DOUBLE, b[0], recvcounts, recvdisps, MPI_DOUBLE, MPI_COMM_WORLD);
+	
 	transpose(bt, b, m);
-	for (size_t i = 0; i < m; i++) {
+
+	// Work already distributed for m
+	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
 		fstinv_(bt[i], &n, z, &nn);
 	}
-
+	
+	MPI_Alltoallv(bt[0], sendcounts, senddisps, MPI_DOUBLE, bt[0], recvcounts, recvdisps, MPI_DOUBLE, MPI_COMM_WORLD);
+	
 	/*
 	* Solve Lambda * \tilde U = \tilde G (Chapter 9. page 101 step 2)
 	*/
-	for (size_t i = 0; i < m; i++) {
+	// Work already distributed for m
+	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
 		for (size_t j = 0; j < m; j++) {
 			bt[i][j] = bt[i][j] / (diag[i] + diag[j]);
 		}
 	}
-
+	
+	MPI_Alltoallv(bt[0], sendcounts, senddisps, MPI_DOUBLE, bt[0], recvcounts, recvdisps, MPI_DOUBLE, MPI_COMM_WORLD);
+	
 	/*
 	* Compute U = S^-1 * (S * Utilde^T) (Chapter 9. page 101 step 3)
 	*/
-	for (size_t i = 0; i < m; i++) {
+	// Work already distributed for m
+	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
 		fst_(bt[i], &n, z, &nn);
 	}
+
+	MPI_Alltoallv(bt[0], sendcounts, senddisps, MPI_DOUBLE, bt[0], recvcounts, recvdisps, MPI_DOUBLE, MPI_COMM_WORLD);
+
 	transpose(b, bt, m);
-	for (size_t i = 0; i < m; i++) {
+
+	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
 		fstinv_(b[i], &n, z, &nn);
 	}
+
+	MPI_Alltoallv(b[0], sendcounts, senddisps, MPI_DOUBLE, b[0], recvcounts, recvdisps, MPI_DOUBLE, MPI_COMM_WORLD);
 
 	/*
 	* Compute maximal value of solution for convergence analysis in L_\infty
 	* norm.
 	*/
 	double u_max = 0.0;
-	for (size_t i = 0; i < m; i++) {
+	// Work already distributed for m
+	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
 		for (size_t j = 0; j < m; j++) {
 			u_max = u_max > b[i][j] ? u_max : b[i][j];
 		}
 	}
+	if (rank != 0) { MPI_Send(&u_max, 2, MPI_DOUBLE, 0, tag, MPI_COMM_WORLD); }
 
 	if (rank == 0) {
+		double recv_u_max;
+
+		for (int p = 1; p < nprocs; p++) {  // Recursive doubling?
+			MPI_Recv(&recv_u_max, 2, MPI_DOUBLE, p, tag, MPI_COMM_WORLD, &status);
+			u_max = u_max > recv_u_max ? u_max : recv_u_max;
+		}
+
 		duration = MPI_Wtime() - time_start;
 		printf("duration: %e\n", duration);
+		printf("u_max = %e\n", u_max);
 	}
-
-	printf("u_max = %e\n", u_max);
 	
 	MPI_Finalize();
 
@@ -197,18 +264,16 @@ real rhs(real x, real y) {
 
 void transpose(real **bt, real **b, size_t m)
 {
-	int rows[2] = {0, 0};  // index, number of rows
+	int *rows = mk_int_array(2, true);  // index, number of rows
 	int nprocs, rank;
-	int tag = 100;
-	MPI_Status status;
 	MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
 	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-	int sendcounts[nprocs];
-	int recvcounts[nprocs];
-	int senddisps[nprocs];
-	int recvdisps[nprocs];
+	int *sendcounts = mk_int_array(nprocs, true);
+	int *recvcounts = mk_int_array(nprocs, true);
+	int *senddisps = mk_int_array(nprocs, true);
+	int *recvdisps = mk_int_array(nprocs, true);
 
-	if (rank == 0) {
+	if (rank == 0 && m < 8) {
 		for (size_t i = 0; i < m; i++) {
 			for (size_t j = 0; j < m; j++) {
 				printf("%f	", b[i][j]);
@@ -217,35 +282,18 @@ void transpose(real **bt, real **b, size_t m)
 		}
 		printf("\n");
 	}
-
-	if (rank ==  0) {
-		int rows_left = m;
-		int p_left = nprocs;
 	
-		while (p_left > 0) {
-			rows[1] = rows_left/p_left;
-			MPI_Send(&rows, 2, MPI_INT, nprocs-p_left, tag, MPI_COMM_WORLD);
-			recvcounts[nprocs-p_left] = rows[1]*m;
-			recvdisps[nprocs-p_left] = rows[0]*m;
-			rows[0] += rows[1];
-			rows_left -= rows[1];
-			p_left--;
-		}
-	}
-	
-	MPI_Recv(&rows, 2, MPI_INT, 0, tag, MPI_COMM_WORLD, &status);
-	//MPI_Barrier(MPI_COMM_WORLD);	
-
-	// Every process need a copy of the receive buffer information
-	MPI_Bcast(&recvcounts, nprocs, MPI_INT, 0, MPI_COMM_WORLD);
-	MPI_Bcast(&recvdisps, nprocs, MPI_INT, 0, MPI_COMM_WORLD);
+	distribute_work(m, rows, recvcounts, recvdisps);  // might want to handle recv buffers another place	
+	//MPI_Barrier(MPI_COMM_WORLD);
 	
 	for (int i = 0; i < nprocs; i++) {
 		sendcounts[i] = rows[1]*m;
 		senddisps[i] = rows[0]*m;
+		recvcounts[i] = recvcounts[i]*m;
+		recvdisps[i] = recvdisps[i]*m;
 	}
 	
-	// Each process transposes their assigned rows
+	// Each process allocates their assigned set of transposed rows from the original columns
 	for (size_t i = rows[0]; i < rows[0] + rows[1]; i++) {
 		for (size_t j = 0; j < m; j++) {
 			bt[i][j] = b[j][i];
@@ -253,19 +301,19 @@ void transpose(real **bt, real **b, size_t m)
 	}
 
 
-/*
+	/*
 	for (size_t i = 0; i < m; i++) {
 		for (size_t j = 0; j < m; j++) {
 			bt[i][j] = b[j][i];
 		}
 	}
-*/
+	*/
 
 	// Every process sends their transposed rows, and stores received ones in bt
 	MPI_Alltoallv(bt[0], sendcounts, senddisps, MPI_DOUBLE, bt[0], recvcounts, recvdisps, MPI_DOUBLE, MPI_COMM_WORLD);
 
 	
-	if (rank == 0) {
+	if (rank == 0 && m < 8) {
 		for (size_t i = 0; i < m; i++) {
 			for (size_t j = 0; j < m; j++) {
 				printf("%f	", bt[i][j]);
@@ -287,6 +335,14 @@ real *mk_1D_array(size_t n, bool zero)
 		return (real *)calloc(n, sizeof(real));
 	}
 	return (real *)malloc(n * sizeof(real));
+}
+
+int *mk_int_array(size_t n, bool zero)
+{
+	if (zero) {
+		return (int *)calloc(n, sizeof(int));
+	}
+	return (int *)malloc(n * sizeof(int));
 }
 
 /*
@@ -316,4 +372,35 @@ real **mk_2D_array(size_t n1, size_t n2, bool zero)
 		ret[i] = ret[i-1] + n2;
 	}
 	return ret;
+}
+
+void distribute_work(int total, int *work, int *recvcounts, int *recvdisps) 
+{
+	int nprocs, rank;
+	int tag = 100;
+	MPI_Status status;
+	MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
+	if (rank ==  0) {
+		int work_left = total;
+		int p_left = nprocs;
+	
+		while (p_left > 0) {
+			int p = nprocs-p_left;
+			work[1] = work_left/p_left;
+			MPI_Send(work, 2, MPI_INT, p, tag, MPI_COMM_WORLD);
+			recvcounts[p] = work[1];
+			recvdisps[p] = work[0];
+			work[0] += work[1];
+			work_left -= work[1];
+			p_left--;
+		}
+	}
+	
+	MPI_Recv(work, 2, MPI_INT, 0, tag, MPI_COMM_WORLD, &status);
+
+	// Every process need a copy of the receive buffer information
+	MPI_Bcast(recvcounts, nprocs, MPI_INT, 0, MPI_COMM_WORLD);
+	MPI_Bcast(recvdisps, nprocs, MPI_INT, 0, MPI_COMM_WORLD);
 }

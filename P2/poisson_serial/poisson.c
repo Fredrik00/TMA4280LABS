@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <math.h>
+#include <time.h>
 
 #define PI 3.14159265358979323846
 #define true 1
@@ -51,6 +52,10 @@ int main(int argc, char **argv)
     int n = atoi(argv[1]);
     int m = n - 1;
     real h = 1.0 / n;
+    double time_start;
+    double duration;
+
+    time_start = clock();
 
     /*
      * Grid points are generated with constant mesh size on both x- and y-axis.
@@ -122,7 +127,6 @@ int main(int argc, char **argv)
     for (size_t i = 0; i < m; i++) {
         fstinv_(bt[i], &n, z, &nn);
     }
-
     /*
      * Solve Lambda * \tilde U = \tilde G (Chapter 9. page 101 step 2)
      */
@@ -139,9 +143,11 @@ int main(int argc, char **argv)
         fst_(bt[i], &n, z, &nn);
     }
     transpose(b, bt, m);
+    printf("before %e\n", b[62][0]);
     for (size_t i = 0; i < m; i++) {
         fstinv_(b[i], &n, z, &nn);
     }
+    printf("after %e\n", b[62][0]);
 
     /*
      * Compute maximal value of solution for convergence analysis in L_\infty
@@ -154,6 +160,9 @@ int main(int argc, char **argv)
         }
     }
 
+    duration = (clock() - time_start)/CLOCKS_PER_SEC;
+
+    printf("duration = %e\n", duration);
     printf("u_max = %e\n", u_max);
 
     return 0;
