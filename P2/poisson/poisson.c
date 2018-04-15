@@ -135,6 +135,7 @@ int main(int argc, char **argv)
 	* reallocations at each function call.
 	*/
 	int threads = omp_get_num_threads();
+	printf("threads %d\n", threads);
 	int nn = 4 * n;
 	//real *z = mk_1D_array(nn, false);
 	real **z = mk_2D_array(threads, nn, false);
@@ -189,6 +190,7 @@ int main(int argc, char **argv)
 	// Work already distributed for m
 	#pragma omp for schedule(static)  // Parallel modifier caused errors
 	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
+		printf("%d\n", omp_get_thread_num());
 		fstinv_(bt[i], &n, z[omp_get_thread_num()], &nn);
 	}
 	
