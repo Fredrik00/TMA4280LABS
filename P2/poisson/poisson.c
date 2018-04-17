@@ -28,6 +28,7 @@ int *mk_int_array(size_t n, bool zero);
 real **mk_2D_array(size_t n1, size_t n2, bool zero);
 void transpose(real **bt, real **b, size_t m);
 real rhs(real x, real y);
+real solution(real x, real y);
 void distribute_work(int total, int *work, int *recvcounts, int *recvdisps);
 
 // Functions implemented in FORTRAN in fst.f and called from C.
@@ -190,7 +191,7 @@ int main(int argc, char **argv)
 	// Work already distributed for m
 	#pragma omp for schedule(static)  // Parallel modifier caused errors
 	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
-		printf("%d\n", omp_get_thread_num());
+		//printf("%d\n", omp_get_thread_num());
 		fstinv_(bt[i], &n, z[omp_get_thread_num()], &nn);
 	}
 	
@@ -245,10 +246,26 @@ int main(int argc, char **argv)
 	
 	MPI_Allreduce(&u_max, &u_max, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
 
+	/*
+	 * Compute the maximum pointwise error for convergence testing.
+	 */
+	real max_error = 0.0;
+	// Work already distributed for m
+    	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
+        	for (size_t j = 0; j < m; j++) {
+            		real sol = solution(grid[i+1], grid[j+1]);
+            		real error = fabs(sol - b[i][j]);
+            		max_error = max_error > error ? max_error : error;
+        	}
+    	}
+
+	MPI_Allreduce(&max_error, &max_error, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+
 	if (rank == 0) {
 		duration = MPI_Wtime() - time_start;
 		printf("duration: %e\n", duration);
 		printf("u_max = %e\n", u_max);
+		printf("max_error = %e\n", max_error);
 	}
 	
 	MPI_Finalize();
@@ -262,7 +279,16 @@ int main(int argc, char **argv)
  */
 
 real rhs(real x, real y) {
-	return 2 * (y - y*y + x - x*x);
+	//return 2 * (y - y*y + x - x*x);
+	return 5 * pow(PI, 2) * sin(PI*x) * sin(2*PI*y);
+}
+
+/*
+ * Exact solution used to perform a convergence test.
+ */
+
+real solution(real x, real y) {
+	return sin(PI*x) * sin(2*PI*y);
 }
 
 /*

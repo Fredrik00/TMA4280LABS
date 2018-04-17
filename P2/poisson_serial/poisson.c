@@ -26,6 +26,7 @@ real *mk_1D_array(size_t n, bool zero);
 real **mk_2D_array(size_t n1, size_t n2, bool zero);
 void transpose(real **bt, real **b, size_t m);
 real rhs(real x, real y);
+real solution(real x, real y);
 
 // Functions implemented in FORTRAN in fst.f and called from C.
 // The trailing underscore comes from a convention for symbol names, called name
@@ -158,10 +159,23 @@ int main(int argc, char **argv)
         }
     }
 
-    duration = (clock() - time_start)/CLOCKS_PER_SEC;
 
-    printf("duration = %e\n", duration);
-    printf("u_max = %e\n", u_max);
+	/*
+	 * Compute the maximum pointwise error for convergence testing.
+	 */
+	real max_error = 0.0;
+    	for (size_t i = 0; i < m; i++) {
+        	for (size_t j = 0; j < m; j++) {
+            		real sol = solution(grid[i+1], grid[j+1]);
+            		real error = fabs(sol - b[i][j]);
+            		max_error = max_error > error ? max_error : error;
+        	}
+    	}
+
+	duration = (clock() - time_start)/CLOCKS_PER_SEC;
+	printf("duration = %e\n", duration);
+	printf("u_max = %e\n", u_max);
+	printf("max_error = %e\n", max_error);
 
     return 0;
 }
@@ -172,7 +186,16 @@ int main(int argc, char **argv)
  */
 
 real rhs(real x, real y) {
-    return 2 * (y - y*y + x - x*x);
+	//return 2 * (y - y*y + x - x*x);
+	return 5 * pow(PI, 2) * sin(PI*x) * sin(2*PI*y);
+}
+
+/*
+ * Exact solution used to perform a convergence test.
+ */
+
+real solution(real x, real y) {
+	return sin(PI*x) * sin(2*PI*y);
 }
 
 /*
