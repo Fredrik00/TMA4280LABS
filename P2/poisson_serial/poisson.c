@@ -143,11 +143,9 @@ int main(int argc, char **argv)
         fst_(bt[i], &n, z, &nn);
     }
     transpose(b, bt, m);
-    printf("before %e\n", b[62][0]);
     for (size_t i = 0; i < m; i++) {
         fstinv_(b[i], &n, z, &nn);
     }
-    printf("after %e\n", b[62][0]);
 
     /*
      * Compute maximal value of solution for convergence analysis in L_\infty

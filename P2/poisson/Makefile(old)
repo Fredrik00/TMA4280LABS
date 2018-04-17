@@ -48,10 +48,10 @@ RM = /usr/bin/cmake -E remove -f
 EQUALS = =
 
 # The top-level source directory on which CMake was run.
-CMAKE_SOURCE_DIR = /home/fredrik/TMA4280LABS/P2/poisson_serial
+CMAKE_SOURCE_DIR = /home/fredrik/TMA4280LABS/P2/poisson
 
 # The top-level build directory on which CMake was run.
-CMAKE_BINARY_DIR = /home/fredrik/TMA4280LABS/P2/poisson_serial
+CMAKE_BINARY_DIR = /home/fredrik/TMA4280LABS/P2/poisson
 
 #=============================================================================
 # Targets provided globally by CMake.
@@ -80,10 +80,15 @@ rebuild_cache/fast: rebuild_cache
 
 # The main all target
 all: cmake_check_build_system
-	$(CMAKE_COMMAND) -E cmake_progress_start /home/fredrik/TMA4280LABS/P2/poisson_serial/CMakeFiles /home/fredrik/TMA4280LABS/P2/poisson_serial/CMakeFiles/progress.marks
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/fredrik/TMA4280LABS/P2/poisson/CMakeFiles /home/fredrik/TMA4280LABS/P2/poisson/CMakeFiles/progress.marks
 	$(MAKE) -f CMakeFiles/Makefile2 all
-	$(CMAKE_COMMAND) -E cmake_progress_start /home/fredrik/TMA4280LABS/P2/poisson_serial/CMakeFiles 0
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/fredrik/TMA4280LABS/P2/poisson/CMakeFiles 0
 .PHONY : all
+
+# The main run target
+run: all
+	mpirun -np 2 -x OMP_NUM_THREADS=2 ./poisson 1024
+.PHONY : run
 
 # The main clean target
 clean:
