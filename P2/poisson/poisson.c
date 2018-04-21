@@ -237,7 +237,8 @@ int main(int argc, char **argv)
 	*/
 	double u_max = 0.0;
 	// Work already distributed for m
-	#pragma omp parallel for schedule(static)
+	// Add openmp, accessing same u_max
+	#pragma omp parallel for reduction(max : u_max)
 	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
 		for (size_t j = 0; j < m; j++) {
 			u_max = u_max > b[i][j] ? u_max : b[i][j];
@@ -251,6 +252,8 @@ int main(int argc, char **argv)
 	 */
 	real max_error = 0.0;
 	// Work already distributed for m
+	// Add openmp, accessing same max_error
+	#pragma omp parallel for reduction(max : max_error)
     	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
         	for (size_t j = 0; j < m; j++) {
             		real sol = solution(grid[i+1], grid[j+1]);
