@@ -14,6 +14,7 @@
 #include <math.h>
 #include <omp.h>
 #include <mpi.h>
+#include <string.h>
 
 #define PI 3.14159265358979323846
 #define true 1
@@ -23,12 +24,15 @@ typedef double real;
 typedef int bool;
 
 // Function prototypes
+void poisson(int n);
 real *mk_1D_array(size_t n, bool zero);
 int *mk_int_array(size_t n, bool zero);
 real **mk_2D_array(size_t n1, size_t n2, bool zero);
 void transpose(real **bt, real **b, size_t m);
 real rhs(real x, real y);
+real solution(real x, real y);
 void distribute_work(int total, int *work, int *recvcounts, int *recvdisps);
+void print_matrix(real **matrix, int m);
 
 // Functions implemented in FORTRAN in fst.f and called from C.
 // The trailing underscore comes from a convention for symbol names, called name
@@ -39,12 +43,37 @@ void fstinv_(real *v, int *n, real *w, int *nn);
 int main(int argc, char **argv)
 {
 	if (argc < 2) {
-	printf("Usage:\n");
-	printf("  poisson n\n\n");
-	printf("Arguments:\n");
-	printf("  n: the problem size (must be a power of 2)\n");
+		printf("Usage:\n");
+		printf("  poisson n\n\n");
+		printf("Arguments:\n");
+		printf("  n: the problem size (must be a power of 2)\n");
 	}
 
+	MPI_Init(&argc, &argv);
+	int rank;
+	int n;
+
+	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
+	if (strcmp(argv[1], "cvtest") == 0){
+		for (int i=2; i<12; i++){
+			n = pow(2, i);
+			if (rank == 0){ printf("Convergence test	n = %i\n", n); }
+			poisson(n);
+		}
+	}
+
+	else {
+		n = atoi(argv[1]);
+		poisson(n);
+	}
+	
+		
+	MPI_Finalize();
+	return 0;
+}
+
+void poisson(int n) {
 	/*
 	*  The equation is solved on a 2D structured grid and homogeneous Dirichlet
 	*  conditions are applied on the boundary:
@@ -52,7 +81,6 @@ int main(int argc, char **argv)
 	*  - the number of degrees of freedom in each direction is m = n-1,
 	*  - the mesh size is constant h = 1/n.
 	*/
-	int n = atoi(argv[1]);
 	int m = n - 1;
 	real h = 1.0 / n;
 
@@ -67,13 +95,15 @@ int main(int argc, char **argv)
 	int *recvcounts = mk_int_array(nprocs, true);
 	int *senddisps = mk_int_array(nprocs, true);
 	int *recvdisps = mk_int_array(nprocs, true);
+	int threads = omp_get_num_threads();
 
-	MPI_Init(&argc, &argv);
 	MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
 	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
 	if (rank == 0) {
-		time_start = MPI_Wtime();	
+		time_start = MPI_Wtime();
+		printf("threads %d\n", threads);
+
 	}
 
 	/*
@@ -82,11 +112,12 @@ int main(int argc, char **argv)
 	real *grid = mk_1D_array(n+1, false);
 	distribute_work(n+1, work, recvcounts, recvdisps);
 	
-	for (int i = 0; i < nprocs; i++) {
+	for (int i = 0; i < nprocs; i++) { // As the setup of buffers do not scale with n it is not treated by parallellization
 		sendcounts[i] = work[1];
 		senddisps[i] = work[0];
 	}
-
+	
+	#pragma omp parallel for schedule(static)
 	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
 		grid[i] = i * h;
 	}
@@ -105,7 +136,8 @@ int main(int argc, char **argv)
 		sendcounts[i] = work[1];
 		senddisps[i] = work[0];
 	}
-
+	
+	#pragma omp parallel for schedule(static)
 	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
 		diag[i] = 2.0 * (1.0 - cos((i+1) * PI / n));
 	}
@@ -133,8 +165,9 @@ int main(int argc, char **argv)
 	* reallocations at each function call.
 	*/
 	int nn = 4 * n;
-	real *z = mk_1D_array(nn, false);
-
+	//real *z = mk_1D_array(nn, false);
+	real **z = mk_2D_array(threads, nn, false);
+	
 	/*
 	* Initialize the right hand side data for a given rhs function.
 	* Note that the right hand-side is set at nodes corresponding to degrees
@@ -143,14 +176,14 @@ int main(int argc, char **argv)
 	*/
 
 	// Work already distributed for m
-		
 	for (int i = 0; i < nprocs; i++) {
 		sendcounts[i] = work[1]*m;
 		senddisps[i] = work[0]*m;
 		recvcounts[i] = recvcounts[i]*m;
 		recvdisps[i] = recvdisps[i]*m;
 	}
-
+	
+	#pragma omp parallel for schedule(static) // Inner loop, outer or both?
 	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
 		for (size_t j = 0; j < m; j++) {
 			b[i][j] = h * h * rhs(grid[i+1], grid[j+1]);
@@ -171,8 +204,11 @@ int main(int argc, char **argv)
 	* array (first argument) so that the initial values are overwritten.
 	*/
 	// Work already distributed for m
+	// Memory bound? Perhaps create local array segments and add up afterwards
+
+	#pragma omp for schedule(static)  // Parallel modifier caused errors
 	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
-		fst_(b[i], &n, z, &nn);
+		fst_(b[i], &n, z[omp_get_thread_num()], &nn);
 	}
 	
 	MPI_Alltoallv(b[0], sendcounts, senddisps, MPI_DOUBLE, b[0], recvcounts, recvdisps, MPI_DOUBLE, MPI_COMM_WORLD);
@@ -180,8 +216,10 @@ int main(int argc, char **argv)
 	transpose(bt, b, m);
 
 	// Work already distributed for m
+	#pragma omp for schedule(static)  // Parallel modifier caused errors
 	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
-		fstinv_(bt[i], &n, z, &nn);
+		//printf("%d\n", omp_get_thread_num());
+		fstinv_(bt[i], &n, z[omp_get_thread_num()], &nn);
 	}
 	
 	MPI_Alltoallv(bt[0], sendcounts, senddisps, MPI_DOUBLE, bt[0], recvcounts, recvdisps, MPI_DOUBLE, MPI_COMM_WORLD);
@@ -190,6 +228,7 @@ int main(int argc, char **argv)
 	* Solve Lambda * \tilde U = \tilde G (Chapter 9. page 101 step 2)
 	*/
 	// Work already distributed for m
+	#pragma omp parallel for schedule(static)
 	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
 		for (size_t j = 0; j < m; j++) {
 			bt[i][j] = bt[i][j] / (diag[i] + diag[j]);
@@ -202,16 +241,19 @@ int main(int argc, char **argv)
 	* Compute U = S^-1 * (S * Utilde^T) (Chapter 9. page 101 step 3)
 	*/
 	// Work already distributed for m
+	#pragma omp for schedule(static)  // Parallel modifier caused error, threads access the same z
 	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
-		fst_(bt[i], &n, z, &nn);
+		fst_(bt[i], &n, z[omp_get_thread_num()], &nn);
 	}
 
 	MPI_Alltoallv(bt[0], sendcounts, senddisps, MPI_DOUBLE, bt[0], recvcounts, recvdisps, MPI_DOUBLE, MPI_COMM_WORLD);
 
 	transpose(b, bt, m);
-
+	
+	// Work already distributed for m
+	#pragma omp for schedule(static)  // Parallel modifier caused errors
 	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
-		fstinv_(b[i], &n, z, &nn);
+		fstinv_(b[i], &n, z[omp_get_thread_num()], &nn);
 	}
 
 	MPI_Alltoallv(b[0], sendcounts, senddisps, MPI_DOUBLE, b[0], recvcounts, recvdisps, MPI_DOUBLE, MPI_COMM_WORLD);
@@ -222,29 +264,39 @@ int main(int argc, char **argv)
 	*/
 	double u_max = 0.0;
 	// Work already distributed for m
+	// Add openmp, accessing same u_max
+	#pragma omp parallel for reduction(max : u_max)
 	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
 		for (size_t j = 0; j < m; j++) {
 			u_max = u_max > b[i][j] ? u_max : b[i][j];
 		}
 	}
-	if (rank != 0) { MPI_Send(&u_max, 2, MPI_DOUBLE, 0, tag, MPI_COMM_WORLD); }
+	
+	MPI_Allreduce(&u_max, &u_max, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+
+	/*
+	 * Compute the maximum pointwise error for convergence testing.
+	 */
+	real max_error = 0.0;
+	// Work already distributed for m
+	// Add openmp, accessing same max_error
+	#pragma omp parallel for reduction(max : max_error)
+    	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
+        	for (size_t j = 0; j < m; j++) {
+            		real sol = solution(grid[i+1], grid[j+1]);
+            		real error = fabs(sol - b[i][j]);
+            		max_error = max_error > error ? max_error : error;
+        	}
+    	}
+
+	MPI_Allreduce(&max_error, &max_error, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
 
 	if (rank == 0) {
-		double recv_u_max;
-
-		for (int p = 1; p < nprocs; p++) {  // Recursive doubling?
-			MPI_Recv(&recv_u_max, 2, MPI_DOUBLE, p, tag, MPI_COMM_WORLD, &status);
-			u_max = u_max > recv_u_max ? u_max : recv_u_max;
-		}
-
 		duration = MPI_Wtime() - time_start;
 		printf("duration: %e\n", duration);
 		printf("u_max = %e\n", u_max);
+		printf("max_error = %e\n", max_error);
 	}
-	
-	MPI_Finalize();
-
-	return 0;
 }
 
 /*
@@ -253,7 +305,16 @@ int main(int argc, char **argv)
  */
 
 real rhs(real x, real y) {
-	return 2 * (y - y*y + x - x*x);
+	//return 2 * (y - y*y + x - x*x);
+	return 5 * pow(PI, 2) * sin(PI*x) * sin(2*PI*y);
+}
+
+/*
+ * Exact solution used to perform a convergence test.
+ */
+
+real solution(real x, real y) {
+	return sin(PI*x) * sin(2*PI*y);
 }
 
 /*
@@ -273,15 +334,7 @@ void transpose(real **bt, real **b, size_t m)
 	int *senddisps = mk_int_array(nprocs, true);
 	int *recvdisps = mk_int_array(nprocs, true);
 
-	if (rank == 0 && m < 8) {
-		for (size_t i = 0; i < m; i++) {
-			for (size_t j = 0; j < m; j++) {
-				printf("%f	", b[i][j]);
-			}
-			printf("\n");
-		}
-		printf("\n");
-	}
+	//if (rank == 0) { print_matrix(b, m); }
 	
 	distribute_work(m, rows, recvcounts, recvdisps);  // might want to handle recv buffers another place	
 	//MPI_Barrier(MPI_COMM_WORLD);
@@ -294,34 +347,18 @@ void transpose(real **bt, real **b, size_t m)
 	}
 	
 	// Each process allocates their assigned set of transposed rows from the original columns
+	#pragma omp parallel for schedule(static)
 	for (size_t i = rows[0]; i < rows[0] + rows[1]; i++) {
 		for (size_t j = 0; j < m; j++) {
 			bt[i][j] = b[j][i];
 		}
 	}
 
-
-	/*
-	for (size_t i = 0; i < m; i++) {
-		for (size_t j = 0; j < m; j++) {
-			bt[i][j] = b[j][i];
-		}
-	}
-	*/
-
 	// Every process sends their transposed rows, and stores received ones in bt
 	MPI_Alltoallv(bt[0], sendcounts, senddisps, MPI_DOUBLE, bt[0], recvcounts, recvdisps, MPI_DOUBLE, MPI_COMM_WORLD);
 
 	
-	if (rank == 0 && m < 8) {
-		for (size_t i = 0; i < m; i++) {
-			for (size_t j = 0; j < m; j++) {
-				printf("%f	", bt[i][j]);
-			}
-			printf("\n");
-		}
-		printf("\n");
-	}
+	//if (rank == 0) { print_matrix(bt, m); }
 }
 
 /*
@@ -403,4 +440,14 @@ void distribute_work(int total, int *work, int *recvcounts, int *recvdisps)
 	// Every process need a copy of the receive buffer information
 	MPI_Bcast(recvcounts, nprocs, MPI_INT, 0, MPI_COMM_WORLD);
 	MPI_Bcast(recvdisps, nprocs, MPI_INT, 0, MPI_COMM_WORLD);
+}
+
+void print_matrix(real **matrix, int m){
+	for (size_t i = 0; i < m; i++) {
+		for (size_t j = 0; j < m; j++) {
+			printf("%f	", matrix[i][j]);
+		}
+		printf("\n");
+	}
+	printf("\n");
 }

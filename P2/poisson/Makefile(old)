@@ -85,6 +85,11 @@ all: cmake_check_build_system
 	$(CMAKE_COMMAND) -E cmake_progress_start /home/fredrik/TMA4280LABS/P2/poisson/CMakeFiles 0
 .PHONY : all
 
+# The main run target
+run: all
+	mpirun -np 2 -x OMP_NUM_THREADS=2 ./poisson 1024
+.PHONY : run
+
 # The main clean target
 clean:
 	$(MAKE) -f CMakeFiles/Makefile2 clean
