@@ -14,6 +14,7 @@
 #include <math.h>
 #include <omp.h>
 #include <mpi.h>
+#include <string.h>
 
 #define PI 3.14159265358979323846
 #define true 1
@@ -23,6 +24,7 @@ typedef double real;
 typedef int bool;
 
 // Function prototypes
+void poisson(int n);
 real *mk_1D_array(size_t n, bool zero);
 int *mk_int_array(size_t n, bool zero);
 real **mk_2D_array(size_t n1, size_t n2, bool zero);
@@ -30,6 +32,7 @@ void transpose(real **bt, real **b, size_t m);
 real rhs(real x, real y);
 real solution(real x, real y);
 void distribute_work(int total, int *work, int *recvcounts, int *recvdisps);
+void print_matrix(real **matrix, int m);
 
 // Functions implemented in FORTRAN in fst.f and called from C.
 // The trailing underscore comes from a convention for symbol names, called name
@@ -40,12 +43,37 @@ void fstinv_(real *v, int *n, real *w, int *nn);
 int main(int argc, char **argv)
 {
 	if (argc < 2) {
-	printf("Usage:\n");
-	printf("  poisson n\n\n");
-	printf("Arguments:\n");
-	printf("  n: the problem size (must be a power of 2)\n");
+		printf("Usage:\n");
+		printf("  poisson n\n\n");
+		printf("Arguments:\n");
+		printf("  n: the problem size (must be a power of 2)\n");
 	}
 
+	MPI_Init(&argc, &argv);
+	int rank;
+	int n;
+
+	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
+	if (strcmp(argv[1], "cvtest") == 0){
+		for (int i=2; i<12; i++){
+			n = pow(2, i);
+			if (rank == 0){ printf("Convergence test	n = %i\n", n); }
+			poisson(n);
+		}
+	}
+
+	else {
+		n = atoi(argv[1]);
+		poisson(n);
+	}
+	
+		
+	MPI_Finalize();
+	return 0;
+}
+
+void poisson(int n) {
 	/*
 	*  The equation is solved on a 2D structured grid and homogeneous Dirichlet
 	*  conditions are applied on the boundary:
@@ -53,7 +81,6 @@ int main(int argc, char **argv)
 	*  - the number of degrees of freedom in each direction is m = n-1,
 	*  - the mesh size is constant h = 1/n.
 	*/
-	int n = atoi(argv[1]);
 	int m = n - 1;
 	real h = 1.0 / n;
 
@@ -68,13 +95,15 @@ int main(int argc, char **argv)
 	int *recvcounts = mk_int_array(nprocs, true);
 	int *senddisps = mk_int_array(nprocs, true);
 	int *recvdisps = mk_int_array(nprocs, true);
+	int threads = omp_get_num_threads();
 
-	MPI_Init(&argc, &argv);
 	MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
 	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
 	if (rank == 0) {
-		time_start = MPI_Wtime();	
+		time_start = MPI_Wtime();
+		printf("threads %d\n", threads);
+
 	}
 
 	/*
@@ -135,8 +164,6 @@ int main(int argc, char **argv)
 	* The array is allocated once and passed as arguments to avoid doings 
 	* reallocations at each function call.
 	*/
-	int threads = omp_get_num_threads();
-	printf("threads %d\n", threads);
 	int nn = 4 * n;
 	//real *z = mk_1D_array(nn, false);
 	real **z = mk_2D_array(threads, nn, false);
@@ -270,10 +297,6 @@ int main(int argc, char **argv)
 		printf("u_max = %e\n", u_max);
 		printf("max_error = %e\n", max_error);
 	}
-	
-	MPI_Finalize();
-
-	return 0;
 }
 
 /*
@@ -311,15 +334,7 @@ void transpose(real **bt, real **b, size_t m)
 	int *senddisps = mk_int_array(nprocs, true);
 	int *recvdisps = mk_int_array(nprocs, true);
 
-	if (rank == 0 && m < 2) {  // Printing for lower m to check that the transpose is correct
-		for (size_t i = 0; i < m; i++) {
-			for (size_t j = 0; j < m; j++) {
-				printf("%f	", b[i][j]);
-			}
-			printf("\n");
-		}
-		printf("\n");
-	}
+	//if (rank == 0) { print_matrix(b, m); }
 	
 	distribute_work(m, rows, recvcounts, recvdisps);  // might want to handle recv buffers another place	
 	//MPI_Barrier(MPI_COMM_WORLD);
@@ -343,15 +358,7 @@ void transpose(real **bt, real **b, size_t m)
 	MPI_Alltoallv(bt[0], sendcounts, senddisps, MPI_DOUBLE, bt[0], recvcounts, recvdisps, MPI_DOUBLE, MPI_COMM_WORLD);
 
 	
-	if (rank == 0 && m < 2) {
-		for (size_t i = 0; i < m; i++) {
-			for (size_t j = 0; j < m; j++) {
-				printf("%f	", bt[i][j]);
-			}
-			printf("\n");
-		}
-		printf("\n");
-	}
+	//if (rank == 0) { print_matrix(bt, m); }
 }
 
 /*
@@ -433,4 +440,14 @@ void distribute_work(int total, int *work, int *recvcounts, int *recvdisps)
 	// Every process need a copy of the receive buffer information
 	MPI_Bcast(recvcounts, nprocs, MPI_INT, 0, MPI_COMM_WORLD);
 	MPI_Bcast(recvdisps, nprocs, MPI_INT, 0, MPI_COMM_WORLD);
+}
+
+void print_matrix(real **matrix, int m){
+	for (size_t i = 0; i < m; i++) {
+		for (size_t j = 0; j < m; j++) {
+			printf("%f	", matrix[i][j]);
+		}
+		printf("\n");
+	}
+	printf("\n");
 }
