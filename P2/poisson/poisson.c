@@ -31,7 +31,7 @@ real **mk_2D_array(size_t n1, size_t n2, bool zero);
 void transpose(real **bt, real **b, size_t m, int* work, int* senddisps, int* sendcounts, int* recvdisps, int* recvcounts);
 real rhs(real x, real y);
 real solution(real x, real y);
-void distribute_work(int total, int *work, int *recvcounts, int *recvdisps);
+void distribute_work(int total, int *work, int *recvdisps, int *recvcounts);
 void print_matrix(real **matrix, int m);
 
 // Functions implemented in FORTRAN in fst.f and called from C.
