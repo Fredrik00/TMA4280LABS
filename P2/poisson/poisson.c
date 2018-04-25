@@ -209,7 +209,7 @@ void poisson(int n) {
 	// Work already distributed for m
 	// Memory bound? Perhaps create local array segments and add up afterwards
 
-	#pragma omp for schedule(static)  // Parallel modifier caused errors
+	#pragma omp parallel for schedule(static)  // Parallel modifier caused errors
 	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
 		fst_(b[i], &n, z[omp_get_thread_num()], &nn);
 	}
@@ -219,7 +219,7 @@ void poisson(int n) {
 	transpose(bt, b, m, work, senddisps, sendcounts, recvdisps, recvcounts);
 
 	// Work already distributed for m
-	#pragma omp for schedule(static)  // Parallel modifier caused errors
+	#pragma omp parralel for schedule(static)  // Parallel modifier caused errors
 	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
 		//printf("%d\n", omp_get_thread_num());
 		fstinv_(bt[i], &n, z[omp_get_thread_num()], &nn);
@@ -244,7 +244,7 @@ void poisson(int n) {
 	* Compute U = S^-1 * (S * Utilde^T) (Chapter 9. page 101 step 3)
 	*/
 	// Work already distributed for m
-	#pragma omp for schedule(static)  // Parallel modifier caused error, threads access the same z
+	#pragma omp parallel for schedule(static)  // Parallel modifier caused error, threads access the same z
 	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
 		fst_(bt[i], &n, z[omp_get_thread_num()], &nn);
 	}
@@ -254,7 +254,7 @@ void poisson(int n) {
 	transpose(b, bt, m, work, senddisps, sendcounts, recvdisps, recvcounts);
 	
 	// Work already distributed for m
-	#pragma omp for schedule(static)  // Parallel modifier caused errors
+	#pragma omp parallel for schedule(static)  // Parallel modifier caused errors
 	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
 		fstinv_(b[i], &n, z[omp_get_thread_num()], &nn);
 	}
