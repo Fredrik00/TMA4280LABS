@@ -93,15 +93,19 @@ void poisson(int n) {
 	int *sendcounts = mk_int_array(nprocs, false);
 	int *recvdisps = mk_int_array(nprocs, false);
 	int *recvcounts = mk_int_array(nprocs, false);
-	int threads = omp_get_num_threads();
+	int threads;
 
 	MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
 	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
+	#pragma omp parallel
+	{
+		threads = omp_get_num_threads();	
+	}
+
 	if (rank == 0) {
 		time_start = MPI_Wtime();
 		printf("threads %d\n", threads);
-
 	}
 
 	/*
