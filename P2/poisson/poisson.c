@@ -88,11 +88,11 @@ void poisson(int n) {
 	MPI_Status status;
 	double time_start;
 	double duration;
-	int *work = mk_int_array(2, true);  // index, number of rows
+	int work[2];//*work = mk_int_array(2, true);  // index, number of rows
 	int *senddisps = mk_int_array(nprocs, false);
 	int *sendcounts = mk_int_array(nprocs, false);
-	int *recvdisps = mk_int_array(nprocs, false);
-	int *recvcounts = mk_int_array(nprocs, false);
+	int *recvdisps = mk_int_array(nprocs, true);
+	int *recvcounts = mk_int_array(nprocs, true);
 	int threads;
 
 	MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
@@ -115,8 +115,8 @@ void poisson(int n) {
 	distribute_work(n+1, work, recvdisps, recvcounts);
 	
 	for (int i = 0; i < nprocs; i++) { // As the setup of buffers do not scale with n it is not treated by parallellization
-		sendcounts[i] = work[1];
 		senddisps[i] = work[0];
+		sendcounts[i] = work[1];
 	}
 	
 	#pragma omp parallel for schedule(static)
@@ -136,8 +136,8 @@ void poisson(int n) {
 	distribute_work(m, work, recvdisps, recvcounts);
 	
 	for (int i = 0; i < nprocs; i++) {
-		sendcounts[i] = work[1];
 		senddisps[i] = work[0];
+		sendcounts[i] = work[1];
 	}
 	
 	#pragma omp parallel for schedule(static)
@@ -180,11 +180,12 @@ void poisson(int n) {
 
 	// Work already distributed for m
 	for (int i = 0; i < nprocs; i++) {
-		sendcounts[i] = work[1]*m;
 		senddisps[i] = work[0]*m;
-		recvcounts[i] = recvcounts[i]*m;
+		sendcounts[i] = work[1]*m;
 		recvdisps[i] = recvdisps[i]*m;
+		recvcounts[i] = recvcounts[i]*m;
 	}
+	fprintf(stderr, "index %d	count %d\n", senddisps[0], sendcounts[0]);
 	
 	#pragma omp parallel for schedule(static) // Inner loop, outer or both?
 	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
@@ -194,7 +195,7 @@ void poisson(int n) {
 	}
 
 	
-	MPI_Alltoallv(b[0], sendcounts, senddisps, MPI_DOUBLE, b[0], recvcounts, recvdisps, MPI_DOUBLE, MPI_COMM_WORLD);
+	//MPI_Alltoallv(b[0], sendcounts, senddisps, MPI_DOUBLE, b[0], recvcounts, recvdisps, MPI_DOUBLE, MPI_COMM_WORLD);
 
 	/*
 	* Compute \tilde G^T = S^-1 * (S * G)^T (Chapter 9. page 101 step 1)
@@ -214,6 +215,7 @@ void poisson(int n) {
 		fst_(b[i], &n, z[omp_get_thread_num()], &nn);
 	}
 	
+	// Alltoallv should only be necessary before a transpose, as processes only work on a specific set of rows otherwise
 	MPI_Alltoallv(b[0], sendcounts, senddisps, MPI_DOUBLE, b[0], recvcounts, recvdisps, MPI_DOUBLE, MPI_COMM_WORLD);
 	
 	transpose(bt, b, m, work, senddisps, sendcounts, recvdisps, recvcounts);
@@ -225,7 +227,7 @@ void poisson(int n) {
 		fstinv_(bt[i], &n, z[omp_get_thread_num()], &nn);
 	}
 	
-	MPI_Alltoallv(bt[0], sendcounts, senddisps, MPI_DOUBLE, bt[0], recvcounts, recvdisps, MPI_DOUBLE, MPI_COMM_WORLD);
+	//MPI_Alltoallv(bt[0], sendcounts, senddisps, MPI_DOUBLE, bt[0], recvcounts, recvdisps, MPI_DOUBLE, MPI_COMM_WORLD);
 	
 	/*
 	* Solve Lambda * \tilde U = \tilde G (Chapter 9. page 101 step 2)
@@ -238,7 +240,7 @@ void poisson(int n) {
 		}
 	}
 	
-	MPI_Alltoallv(bt[0], sendcounts, senddisps, MPI_DOUBLE, bt[0], recvcounts, recvdisps, MPI_DOUBLE, MPI_COMM_WORLD);
+	//MPI_Alltoallv(bt[0], sendcounts, senddisps, MPI_DOUBLE, bt[0], recvcounts, recvdisps, MPI_DOUBLE, MPI_COMM_WORLD);
 	
 	/*
 	* Compute U = S^-1 * (S * Utilde^T) (Chapter 9. page 101 step 3)
@@ -258,8 +260,9 @@ void poisson(int n) {
 	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
 		fstinv_(b[i], &n, z[omp_get_thread_num()], &nn);
 	}
-
-	MPI_Alltoallv(b[0], sendcounts, senddisps, MPI_DOUBLE, b[0], recvcounts, recvdisps, MPI_DOUBLE, MPI_COMM_WORLD);
+	
+	// Uncomment this to gather the solution, but we don't really need that
+	//MPI_Alltoallv(b[0], sendcounts, senddisps, MPI_DOUBLE, b[0], recvcounts, recvdisps, MPI_DOUBLE, MPI_COMM_WORLD);
 
 	/*
 	* Compute maximal value of solution for convergence analysis in L_\infty
@@ -343,7 +346,7 @@ void transpose(real **bt, real **b, size_t m, int* work, int* senddisps, int* se
 	}
 
 	// Every process sends their transposed rows, and stores received ones in bt
-	MPI_Alltoallv(bt[0], sendcounts, senddisps, MPI_DOUBLE, bt[0], recvcounts, recvdisps, MPI_DOUBLE, MPI_COMM_WORLD);
+	//MPI_Alltoallv(bt[0], sendcounts, senddisps, MPI_DOUBLE, bt[0], recvcounts, recvdisps, MPI_DOUBLE, MPI_COMM_WORLD);
 
 	
 	//if (rank == 0) { print_matrix(bt, m); }
@@ -399,12 +402,10 @@ real **mk_2D_array(size_t n1, size_t n2, bool zero)
 	return ret;
 }
 
-// Load balancing is handled on each processor as this slightly improved stability on more processors, and should not provide any added overhead given the nature of the program
+// Load balancing is handled on each processor as this slightly improved stability on more processors, this also removes the necessity for mpi send, recv and broadcast
 void distribute_work(int total, int *work, int *recvdisps, int *recvcounts) 
 {
 	int nprocs, rank;
-	int tag = 100;
-	MPI_Status status;
 	MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
 	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 	
