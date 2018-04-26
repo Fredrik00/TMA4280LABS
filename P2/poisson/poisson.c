@@ -185,7 +185,7 @@ void poisson(int n) {
 		recvdisps[i] = recvdisps[i]*m;
 		recvcounts[i] = recvcounts[i]*m;
 	}
-	fprintf(stderr, "index %d	count %d\n", senddisps[0], sendcounts[0]);
+	//fprintf(stderr, "index %d	count %d\n", senddisps[0], sendcounts[0]);
 	
 	#pragma omp parallel for schedule(static) // Inner loop, outer or both?
 	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
