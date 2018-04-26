@@ -84,6 +84,8 @@ void poisson(int n) {
 	real h = 1.0 / n;
 
 	int nprocs, rank;
+	MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 	int tag = 100;
 	MPI_Status status;
 	double time_start;
@@ -94,9 +96,6 @@ void poisson(int n) {
 	int *recvdisps = mk_int_array(nprocs, true);
 	int *recvcounts = mk_int_array(nprocs, true);
 	int threads;
-
-	MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
-	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
 	#pragma omp parallel
 	{
