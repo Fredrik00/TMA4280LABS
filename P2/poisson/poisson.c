@@ -72,6 +72,7 @@ int main(int argc, char **argv)
 	return 0;
 }
 
+
 void poisson(int n) {
 	/*
 	*  The equation is solved on a 2D structured grid and homogeneous Dirichlet
@@ -90,7 +91,7 @@ void poisson(int n) {
 	MPI_Status status;
 	double time_start;
 	double duration;
-	int work[2];//*work = mk_int_array(2, true);  // index, number of rows
+	int work[2]; // index, number of rows
 	int *senddisps = mk_int_array(nprocs, false);
 	int *sendcounts = mk_int_array(nprocs, false);
 	int *recvdisps = mk_int_array(nprocs, true);
@@ -167,7 +168,6 @@ void poisson(int n) {
 	* reallocations at each function call.
 	*/
 	int nn = 4 * n;
-	//real *z = mk_1D_array(nn, false);
 	real **z = mk_2D_array(threads, nn, false);
 	
 	/*
@@ -184,9 +184,8 @@ void poisson(int n) {
 		recvdisps[i] = recvdisps[i]*m;
 		recvcounts[i] = recvcounts[i]*m;
 	}
-	//fprintf(stderr, "index %d	count %d\n", senddisps[0], sendcounts[0]);
 	
-	#pragma omp parallel for schedule(static) // Inner loop, outer or both?
+	#pragma omp parallel for schedule(static)
 	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
 		for (size_t j = 0; j < m; j++) {
 			b[i][j] = h * h * rhs(grid[i+1], grid[j+1]);
@@ -207,9 +206,7 @@ void poisson(int n) {
 	* array (first argument) so that the initial values are overwritten.
 	*/
 	// Work already distributed for m
-	// Memory bound? Perhaps create local array segments and add up afterwards
-
-	#pragma omp parallel for schedule(static)  // Parallel modifier caused errors
+	#pragma omp parallel for schedule(static)
 	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
 		fst_(b[i], &n, z[omp_get_thread_num()], &nn);
 	}
@@ -220,7 +217,7 @@ void poisson(int n) {
 	transpose(bt, b, m, work, senddisps, sendcounts, recvdisps, recvcounts);
 
 	// Work already distributed for m
-	#pragma omp parralel for schedule(static)  // Parallel modifier caused errors
+	#pragma omp parralel for schedule(static)
 	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
 		//printf("%d\n", omp_get_thread_num());
 		fstinv_(bt[i], &n, z[omp_get_thread_num()], &nn);
@@ -245,7 +242,7 @@ void poisson(int n) {
 	* Compute U = S^-1 * (S * Utilde^T) (Chapter 9. page 101 step 3)
 	*/
 	// Work already distributed for m
-	#pragma omp parallel for schedule(static)  // Parallel modifier caused error, threads access the same z
+	#pragma omp parallel for schedule(static)
 	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
 		fst_(bt[i], &n, z[omp_get_thread_num()], &nn);
 	}
@@ -255,7 +252,7 @@ void poisson(int n) {
 	transpose(b, bt, m, work, senddisps, sendcounts, recvdisps, recvcounts);
 	
 	// Work already distributed for m
-	#pragma omp parallel for schedule(static)  // Parallel modifier caused errors
+	#pragma omp parallel for schedule(static)
 	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
 		fstinv_(b[i], &n, z[omp_get_thread_num()], &nn);
 	}
@@ -269,7 +266,6 @@ void poisson(int n) {
 	*/
 	double u_max = 0.0;
 	// Work already distributed for m
-	// Add openmp, accessing same u_max
 	#pragma omp parallel for reduction(max : u_max)
 	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
 		for (size_t j = 0; j < m; j++) {
@@ -284,7 +280,6 @@ void poisson(int n) {
 	 */
 	real max_error = 0.0;
 	// Work already distributed for m
-	// Add openmp, accessing same max_error
 	#pragma omp parallel for reduction(max : max_error)
     	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
         	for (size_t j = 0; j < m; j++) {
@@ -304,30 +299,31 @@ void poisson(int n) {
 	}
 }
 
+
 /*
  * This function is used for initializing the right-hand side of the equation.
  * Other functions can be defined to swtich between problem definitions.
  */
-
 real rhs(real x, real y) {
 	//return 2 * (y - y*y + x - x*x);
+	//return exp(x) * sin(2*PI*x) * sin(2*PI*y);
 	return 5 * pow(PI, 2) * sin(PI*x) * sin(2*PI*y);
 }
+
 
 /*
  * Exact solution used to perform a convergence test.
  */
-
 real solution(real x, real y) {
 	return sin(PI*x) * sin(2*PI*y);
 }
+
 
 /*
  * Write the transpose of b a matrix of R^(m*m) in bt.
  * In parallel the function MPI_Alltoallv is used to map directly the entries
  * stored in the array to the block structure, using displacement arrays.
  */
-
 void transpose(real **bt, real **b, size_t m, int* work, int* senddisps, int* sendcounts, int* recvdisps, int* recvcounts)
 {
 	int nprocs, rank;
@@ -351,11 +347,11 @@ void transpose(real **bt, real **b, size_t m, int* work, int* senddisps, int* se
 	//if (rank == 0) { print_matrix(bt, m); }
 }
 
+
 /*
  * The allocation of a vectore of size n is done with just allocating an array.
  * The only thing to notice here is the use of calloc to zero the array.
  */
-
 real *mk_1D_array(size_t n, bool zero)
 {
 	if (zero) {
@@ -363,6 +359,7 @@ real *mk_1D_array(size_t n, bool zero)
 	}
 	return (real *)malloc(n * sizeof(real));
 }
+
 
 int *mk_int_array(size_t n, bool zero)
 {
@@ -372,6 +369,7 @@ int *mk_int_array(size_t n, bool zero)
 	return (int *)malloc(n * sizeof(int));
 }
 
+
 /*
  * The allocation of the two-dimensional array used for storing matrices is done
  * in the following way for a matrix in R^(n1*n2):
@@ -380,7 +378,6 @@ int *mk_int_array(size_t n, bool zero)
  *   is contigusous,
  * 3. pointers are set for each row to the address of first element.
  */
-
 real **mk_2D_array(size_t n1, size_t n2, bool zero)
 {
 	// 1
