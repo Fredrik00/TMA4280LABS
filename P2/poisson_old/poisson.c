@@ -49,10 +49,9 @@ int main(int argc, char **argv)
 		printf("  n: the problem size (must be a power of 2)\n");
 	}
 
-	//int *provided;
-	//MPI_Init_thread(&argc, &argv, MPI_THREAD_FUNNELED, provided);  // Did not work entirely as it should
 	MPI_Init(&argc, &argv);
-	int rank, n;
+	int rank;
+	int n;
 
 	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
@@ -85,21 +84,68 @@ void poisson(int n) {
 	int m = n - 1;
 	real h = 1.0 / n;
 
-	int nprocs, rank, threads;
+	int nprocs, rank;
 	MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
 	MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+	int tag = 100;
+	MPI_Status status;
 	double time_start;
 	double duration;
-	int work[2];//*work = mk_int_array(2, true);  // index, number of rows
+	int work[2]; // index, number of rows
 	int *senddisps = mk_int_array(nprocs, false);
 	int *sendcounts = mk_int_array(nprocs, false);
 	int *recvdisps = mk_int_array(nprocs, true);
 	int *recvcounts = mk_int_array(nprocs, true);
-	double u_max = 0.0;
-	real max_error = 0.0;
-	real *grid = mk_1D_array(n+1, false);
+	int threads;
 
+	#pragma omp parallel
+	{
+		threads = omp_get_num_threads();	
+	}
+
+	if (rank == 0) {
+		time_start = MPI_Wtime();
+		printf("threads %d\n", threads);
+	}
+
+	/*
+	* Grid points are generated with constant mesh size on both x- and y-axis.
+	*/
+	real *grid = mk_1D_array(n+1, false);
+	distribute_work(n+1, work, recvdisps, recvcounts);
+	
+	for (int i = 0; i < nprocs; i++) { // As the setup of buffers do not scale with n it is not treated by parallellization
+		senddisps[i] = work[0];
+		sendcounts[i] = work[1];
+	}
+	
+	#pragma omp parallel for schedule(static)
+	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
+		grid[i] = i * h;
+	}
+
+	MPI_Alltoallv(grid, sendcounts, senddisps, MPI_DOUBLE, grid, recvcounts, recvdisps, MPI_DOUBLE, MPI_COMM_WORLD);
+
+
+	/*
+	* The diagonal of the eigenvalue matrix of T is set with the eigenvalues
+	* defined Chapter 9. page 93 of the Lecture Notes.
+	* Note that the indexing starts from zero here, thus i+1.
+	*/
 	real *diag = mk_1D_array(m, false);
+	distribute_work(m, work, recvdisps, recvcounts);
+	
+	for (int i = 0; i < nprocs; i++) {
+		senddisps[i] = work[0];
+		sendcounts[i] = work[1];
+	}
+	
+	#pragma omp parallel for schedule(static)
+	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
+		diag[i] = 2.0 * (1.0 - cos((i+1) * PI / n));
+	}
+
+	MPI_Alltoallv(diag, sendcounts, senddisps, MPI_DOUBLE, diag, recvcounts, recvdisps, MPI_DOUBLE, MPI_COMM_WORLD);
 
 	/*
 	* Allocate the matrices b and bt which will be used for storing value of
@@ -108,95 +154,8 @@ void poisson(int n) {
 	real **b = mk_2D_array(m, m, false);
 	real **bt = mk_2D_array(m, m, false);
 
-	int nn = 4 * n;
-
-	if (rank == 0) {
-		time_start = MPI_Wtime();
-	}
-
 	/*
-	* Grid points are generated with constant mesh size on both x- and y-axis.
-	*/
-	distribute_work(n+1, work, recvdisps, recvcounts);
-	
-	for (int i = 0; i < nprocs; i++) { // As the setup of buffers do not scale with n it is not treated by parallellization
-		senddisps[i] = work[0];
-		sendcounts[i] = work[1];
-	}
-
-	#pragma omp parallel
-	{
-	
-	#pragma omp for schedule(static)
-	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
-		grid[i] = i * h;
-	}
-	
-	#pragma omp master
-	{
-	MPI_Alltoallv(grid, sendcounts, senddisps, MPI_DOUBLE, grid, recvcounts, recvdisps, MPI_DOUBLE, MPI_COMM_WORLD);
-
-	distribute_work(m, work, recvdisps, recvcounts);
-
-	for (int i = 0; i < nprocs; i++) {
-		senddisps[i] = work[0];
-		sendcounts[i] = work[1];
-	}
-	}
-	#pragma omp barrier
-
-	/*
-	* The diagonal of the eigenvalue matrix of T is set with the eigenvalues
-	* defined Chapter 9. page 93 of the Lecture Notes.
-	* Note that the indexing starts from zero here, thus i+1.
-	*/
-	#pragma omp for schedule(static)
-	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
-		diag[i] = 2.0 * (1.0 - cos((i+1) * PI / n));
-	}
-
-	#pragma omp master
-	{
-	MPI_Alltoallv(diag, sendcounts, senddisps, MPI_DOUBLE, diag, recvcounts, recvdisps, MPI_DOUBLE, MPI_COMM_WORLD);
-	}
-	#pragma omp barrier
-
-	// Work already distributed for m
-	#pragma omp master
-	{
-	for (int i = 0; i < nprocs; i++) {
-		senddisps[i] = work[0]*m;
-		sendcounts[i] = work[1]*m;
-		recvdisps[i] = recvdisps[i]*m;
-		recvcounts[i] = recvcounts[i]*m;
-	}
-	}
-	#pragma omp barrier
-
-	/*
-	* Initialize the right hand side data for a given rhs function.
-	* Note that the right hand-side is set at nodes corresponding to degrees
-	* of freedom, so it excludes the boundary (bug fixed by petterjf 2017).
-	* 
-	*/
-	#pragma omp for schedule(static)
-	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
-		for (size_t j = 0; j < m; j++) {
-			b[i][j] = h * h * rhs(grid[i+1], grid[j+1]);
-		}
-	}
-	
-	#pragma omp master
-	{
-	threads = omp_get_num_threads();
-	if (rank == 0) { printf("threads %d\n", threads); }
-	}
-	#pragma omp barrier
-	
-	//MPI_Alltoallv(b[0], sendcounts, senddisps, MPI_DOUBLE, b[0], recvcounts, recvdisps, MPI_DOUBLE, MPI_COMM_WORLD);
-	
-	/*
-	* This vector will hold coefficients of the Discrete Sine Transform (DST)
+	* This vector will holds coefficients of the Discrete Sine Transform (DST)
 	* but also of the Fast Fourier Transform used in the FORTRAN code.
 	* The storage size is set to nn = 4 * n, look at Chapter 9. pages 98-100:
 	* - Fourier coefficients are complex so storage is used for the real part
@@ -208,7 +167,33 @@ void poisson(int n) {
 	* The array is allocated once and passed as arguments to avoid doings 
 	* reallocations at each function call.
 	*/
-	real *z = mk_1D_array(nn, false); // Created in the parrallel section, so should be private
+	int nn = 4 * n;
+	real **z = mk_2D_array(threads, nn, false);
+	
+	/*
+	* Initialize the right hand side data for a given rhs function.
+	* Note that the right hand-side is set at nodes corresponding to degrees
+	* of freedom, so it excludes the boundary (bug fixed by petterjf 2017).
+	* 
+	*/
+
+	// Work already distributed for m
+	for (int i = 0; i < nprocs; i++) {
+		senddisps[i] = work[0]*m;
+		sendcounts[i] = work[1]*m;
+		recvdisps[i] = recvdisps[i]*m;
+		recvcounts[i] = recvcounts[i]*m;
+	}
+	
+	#pragma omp parallel for schedule(static)
+	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
+		for (size_t j = 0; j < m; j++) {
+			b[i][j] = h * h * rhs(grid[i+1], grid[j+1]);
+		}
+	}
+
+	
+	//MPI_Alltoallv(b[0], sendcounts, senddisps, MPI_DOUBLE, b[0], recvcounts, recvdisps, MPI_DOUBLE, MPI_COMM_WORLD);
 
 	/*
 	* Compute \tilde G^T = S^-1 * (S * G)^T (Chapter 9. page 101 step 1)
@@ -221,30 +206,30 @@ void poisson(int n) {
 	* array (first argument) so that the initial values are overwritten.
 	*/
 	// Work already distributed for m
-	#pragma omp for schedule(static)
+	#pragma omp parallel for schedule(static)
 	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
-		fst_(b[i], &n, z, &nn);
+		fst_(b[i], &n, z[omp_get_thread_num()], &nn);
 	}
-
+	
 	// Alltoallv should only be necessary before a transpose, as processes only work on a specific set of rows otherwise
-	#pragma omp master
-	{	
 	MPI_Alltoallv(b[0], sendcounts, senddisps, MPI_DOUBLE, b[0], recvcounts, recvdisps, MPI_DOUBLE, MPI_COMM_WORLD);
-	}
-	#pragma omp barrier
 	
 	transpose(bt, b, m, work, senddisps, sendcounts, recvdisps, recvcounts);
 
 	// Work already distributed for m
-	#pragma omp for schedule(static)
+	#pragma omp parralel for schedule(static)
 	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
-		fstinv_(bt[i], &n, z, &nn);
+		//printf("%d\n", omp_get_thread_num());
+		fstinv_(bt[i], &n, z[omp_get_thread_num()], &nn);
 	}
 	
 	//MPI_Alltoallv(bt[0], sendcounts, senddisps, MPI_DOUBLE, bt[0], recvcounts, recvdisps, MPI_DOUBLE, MPI_COMM_WORLD);
 	
+	/*
+	* Solve Lambda * \tilde U = \tilde G (Chapter 9. page 101 step 2)
+	*/
 	// Work already distributed for m
-	#pragma omp for schedule(static)
+	#pragma omp parallel for schedule(static)
 	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
 		for (size_t j = 0; j < m; j++) {
 			bt[i][j] = bt[i][j] / (diag[i] + diag[j]);
@@ -253,49 +238,49 @@ void poisson(int n) {
 	
 	//MPI_Alltoallv(bt[0], sendcounts, senddisps, MPI_DOUBLE, bt[0], recvcounts, recvdisps, MPI_DOUBLE, MPI_COMM_WORLD);
 	
+	/*
+	* Compute U = S^-1 * (S * Utilde^T) (Chapter 9. page 101 step 3)
+	*/
 	// Work already distributed for m
-	#pragma omp for schedule(static)  // Parallel modifier caused error, threads access the same z
+	#pragma omp parallel for schedule(static)
 	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
-		fst_(bt[i], &n, z, &nn);
+		fst_(bt[i], &n, z[omp_get_thread_num()], &nn);
 	}
-	
-	#pragma omp master
-	{
+
 	MPI_Alltoallv(bt[0], sendcounts, senddisps, MPI_DOUBLE, bt[0], recvcounts, recvdisps, MPI_DOUBLE, MPI_COMM_WORLD);
-	}
-	#pragma omp barrier
 
 	transpose(b, bt, m, work, senddisps, sendcounts, recvdisps, recvcounts);
 	
 	// Work already distributed for m
-	#pragma omp for schedule(static)  // Parallel modifier caused errors
+	#pragma omp parallel for schedule(static)
 	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
-		fstinv_(b[i], &n, z, &nn);
+		fstinv_(b[i], &n, z[omp_get_thread_num()], &nn);
 	}
 	
 	// Uncomment this to gather the solution, but we don't really need that
 	//MPI_Alltoallv(b[0], sendcounts, senddisps, MPI_DOUBLE, b[0], recvcounts, recvdisps, MPI_DOUBLE, MPI_COMM_WORLD);
 
+	/*
+	* Compute maximal value of solution for convergence analysis in L_\infty
+	* norm.
+	*/
+	double u_max = 0.0;
 	// Work already distributed for m
-	#pragma omp for reduction(max : u_max)
+	#pragma omp parallel for reduction(max : u_max)
 	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
 		for (size_t j = 0; j < m; j++) {
 			u_max = u_max > b[i][j] ? u_max : b[i][j];
 		}
 	}
 	
-	/*
-	* Compute maximal value of solution for convergence analysis in L_\infty
-	* norm.
-	*/
-	#pragma omp master
-	{
 	MPI_Allreduce(&u_max, &u_max, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
-	}
-	#pragma omp barrier
 
+	/*
+	 * Compute the maximum pointwise error for convergence testing.
+	 */
+	real max_error = 0.0;
 	// Work already distributed for m
-	#pragma omp for reduction(max : max_error)
+	#pragma omp parallel for reduction(max : max_error)
     	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
         	for (size_t j = 0; j < m; j++) {
             		real sol = solution(grid[i+1], grid[j+1]);
@@ -304,16 +289,7 @@ void poisson(int n) {
         	}
     	}
 
-	/*
-	 * Compute the maximum pointwise error for convergence testing.
-	 */
-	#pragma omp master
-	{
 	MPI_Allreduce(&max_error, &max_error, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
-	}
-	#pragma omp barrier
-
-	} // End of omp parallel section
 
 	if (rank == 0) {
 		duration = MPI_Wtime() - time_start;
@@ -330,6 +306,7 @@ void poisson(int n) {
  */
 real rhs(real x, real y) {
 	//return 2 * (y - y*y + x - x*x);
+	//return exp(x) * sin(2*PI*x) * sin(2*PI*y);
 	return 5 * pow(PI, 2) * sin(PI*x) * sin(2*PI*y);
 }
 
@@ -356,7 +333,7 @@ void transpose(real **bt, real **b, size_t m, int* work, int* senddisps, int* se
 	//if (rank == 0) { print_matrix(b, m); }
 	
 	// Each process allocates their assigned set of transposed rows from the original columns
-	#pragma omp for schedule(static)
+	#pragma omp parallel for schedule(static)
 	for (size_t i = work[0]; i < work[0] + work[1]; i++) {
 		for (size_t j = 0; j < m; j++) {
 			bt[i][j] = b[j][i];
@@ -421,7 +398,6 @@ real **mk_2D_array(size_t n1, size_t n2, bool zero)
 	return ret;
 }
 
-
 // Load balancing is handled on each processor as this slightly improved stability on more processors, this also removes the necessity for mpi send, recv and broadcast
 void distribute_work(int total, int *work, int *recvdisps, int *recvcounts) 
 {
@@ -450,7 +426,6 @@ void distribute_work(int total, int *work, int *recvdisps, int *recvcounts)
 		p_left--;
 	}
 }
-
 
 void print_matrix(real **matrix, int m){
 	for (size_t i = 0; i < m; i++) {
